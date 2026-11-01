@@ -1,0 +1,47 @@
+import numpy as np
+import onnxruntime as ort
+import onnx
+
+# 1. 加载模型
+model = onnx.load("gtcrn.onnx")
+
+# 2. 自动寻找所有 Conv 节点的输出名字
+conv_names = []
+for node in model.graph.node:
+    if node.op_type == "Conv":
+        conv_names.append(node.output[0])
+
+print("Conv 节点顺序：")
+for i, n in enumerate(conv_names[:6]):
+    print(f"  [{i}] {n}")
+
+# 3. 强行将中间层暴露为模型输出
+inferred_model = onnx.shape_inference.infer_shapes(model)
+for out_info in inferred_model.graph.value_info:
+    if out_info.name in conv_names:
+        model.graph.output.append(out_info)
+
+onnx.save(model, "temp_gtcrn.onnx")
+sess = ort.InferenceSession("temp_gtcrn.onnx")
+
+# 4. 构造假输入，和 C 的 fake_re=1.0f / fake_im=1.0f 对齐
+#    C 在进网络前除以 32，所以 Python 输入填 1/32
+input_data = np.zeros((1, 257, 10, 2), dtype=np.float32)
+input_data[:, :, :, 0] = 1.0 / 32.0   # 实部
+input_data[:, :, :, 1] = 1.0 / 32.0   # ★ 虚部也填 1/32，和 C 一致
+
+# 5. 跑模型截获输出
+print("Running ONNX...")
+outputs = sess.run(conv_names, {"input_spec": input_data})
+
+# 6. 打印前 4 个 Conv 层第一个值
+for i in range(min(4, len(conv_names))):
+    print(f"Python Node {i} ({conv_names[i]}): {outputs[i].flatten()[0]:.6f}")
+
+# 7. 打印 Conv2 输出（Node 1）的 enc_main / enc_skip
+#    outputs[1] 形状 (1, 16, 10, 33)，去掉 batch 维
+x = outputs[1][0]  # (16, 10, 33)
+print("py enc_main[0..7][0][0]:", x[0:8, 0, 0].tolist())
+print("py enc_main[0..7][0][1]:", x[0:8, 0, 1].tolist())
+print("py enc_skip[0..7][0][0]:", x[8:16, 0, 0].tolist())
+
